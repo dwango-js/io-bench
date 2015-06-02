@@ -1,0 +1,248 @@
+#!/usr/bin/env node
+
+var cluster = require('cluster');
+var os = require('os');
+var crypto = require('crypto');
+var program = require('commander');
+var io = require('socket.io-client');
+var timesLimit = require('../lib/times-limit');
+var AnimationFrame = require('../lib/animation-frame');
+var utils = require('../lib/utils');
+var adapters = require('../lib/adapters');
+var logger = require('../lib/logger')();
+
+program
+  .usage('[options] <url>')
+  .option('-n, --connections <connections>', 'number of connections to perform per worker', parseInt)
+  .option('-c, --concurrency <connections>', 'number of new connections to establish at a time per worker', parseInt)
+  .option('-m, --messages <messages>', 'messages to be sent per connection', parseInt)
+  .option('-R, --message-rate <rate>', 'number of messages to be sent per second', parseInt)
+  .option('-b, --buffer <size>', 'max size of a message', parseInt)
+  .option('-w, --workers <workers>', 'number of workers, default to numbers of CPU', parseInt)
+  .option('-p, --polling-rate <rate>', 'rate of polling (only for socket.io and engine.io)', parseFloat)
+  .option('-s, --sync', 'whether to wait all connections are established before sending messages')
+  .option('-t, --transport <type>', 'transport type, one of socket.io, engine.io or websocket. default to socket.io')
+  .parse(process.argv);
+
+if (!program.args.length) {
+  program.outputHelp();
+  return;
+}
+
+program.connections = program.connections || 1;
+program.concurrency = program.concurrency || 1;
+program.messages = program.messages || 1;
+program.messageRate = program.messageRate || 1;
+program.buffer = null != program.buffer ? program.buffer : 1024;
+program.workers = program.workers || os.cpus().length;
+program.transport = program.transport || 'socket.io';
+if (null == program.pollingRate) {
+  program.pollingRate = 0;
+}
+var animationFrame = new AnimationFrame(program.messageRate);
+
+if (program.workers > os.cpus().length) {
+  console.error('Too many workers:', program.workers);
+  process.exit(1);
+  return;
+}
+
+var Adapter = adapters[program.transport];
+if (!Adapter) {
+  console.error('Invalid transport type: ', program.transport);
+  process.exit(1);
+  return;
+}
+
+var url = program.args[0];
+
+if (cluster.isMaster) {
+  logger.intro(url, program.opts());
+
+  var count = 0;
+  var msgsMap = {};
+  cluster.on('fork', function(worker) {
+    worker.on('message', function(msg) {
+      var msgs = msgsMap[msg.type] = msgsMap[msg.type] || [];
+      msgs.push(msg);
+      if (msgs.length !== program.workers) return;
+
+      var data = utils.invert(msgs);
+
+      switch (msg.type) {
+      case 'report':
+        logger.progress(data);
+        break;
+      case 'connect':
+        logger.progress(data, 'all connections established');
+        if (program.wait) {
+          for (var id in cluster.workers) {
+            cluster.workers[id].send({ type: 'connect' });
+          }
+        }
+        break;
+      case 'end':
+        logger.progress(data, 'all tests finished');
+        logger.result(data.messageRates);
+        break;
+      default:
+        throw new Error('Unexpected type: ' + msg.type);
+      }
+    });
+  }).on('exit', function(worker, code, signal) {
+    count++;
+    clearInterval(reportIntervalId);
+    if (count === program.workers) {
+      logger.outro();
+    }
+  });
+
+  for (var i = 0; i < program.workers; i++) {
+    cluster.fork();
+  }
+
+  var reportIntervalId = setInterval(function() {
+    delete msgsMap.report;
+    for (var id in cluster.workers) {
+      cluster.workers[id].send({ type: 'report' });
+    }
+  }, 5000);
+  return;
+}
+
+var connecting = 0;
+var connected = 0;
+var finished = 0;
+var connectErrors = 0;
+var errors = 0;
+var testDelays = [];
+var buffers = [];
+var sockets = [];
+
+// cache buffers
+for (var i = 0; i < 100; i++) {
+  var size = Math.floor(Math.random() * program.buffer + 1);
+  buffers.push(crypto.pseudoRandomBytes(size));
+}
+
+var opts = program.opts();
+timesLimit(program.connections, program.concurrency, function(i, next) {
+  var socket = new Adapter(url, opts);
+
+  socket.on('connect_error', function() {
+    connectErrors++;
+    finish(socket);
+    next();
+  });
+
+  socket.on('connect', function() {
+    connecting++;
+    connected++;
+
+    socket
+      .on('disconnect', onDisconnect)
+      .on('error', onError);
+
+    ready(socket, next);
+
+    function onDisconnect(reason) {
+      cleanup();
+      connecting--;
+      finish(socket);
+    }
+
+    function onError(err) {
+      // NOTE: cleanup should happen upon disconnect
+      errors++;
+      socket.disconnect();
+    }
+
+    function cleanup() {
+      socket
+        .removeListener('disconnect', onDisconnect)
+        .removeListener('error', onError);
+    }
+  });
+}, function() {
+  process.send(createReport('connect'));
+});
+
+process.on('message', function(msg) {
+  switch (msg.type) {
+  case 'report':
+    process.send(createReport());
+    break;
+  case 'connect':
+    sockets.forEach(function(socket) {
+      test(socket);
+    });
+    break;
+  default:
+    throw Error('Unexpected type:', msg.type);
+  }
+});
+
+var ready;
+if (program.wait) {
+  ready = function(socket, callback) {
+    sockets.push(socket);
+    callback();
+  };
+} else {
+  ready = function(socket, callback) {
+    test(socket);
+    callback();
+  };
+}
+
+function test(socket) {
+  var start;
+  var counter = 0;
+
+  animationFrame.request(function tick() {
+    var data = buffers[Math.floor(Math.random() * 100)];
+
+    if (counter < program.messages) {
+      if (!counter) {
+        socket.send(data, function() {
+          start = process.hrtime();
+        });
+      } else {
+        socket.send(data);
+      }
+      animationFrame.request(tick);
+    } else {
+      socket.send(data, function() {
+        testDelays.push(process.hrtime(start));
+        socket.disconnect();
+      });
+    }
+
+    counter++;
+  });
+}
+
+function finish(socket) {
+  finished++;
+  if (finished < program.connections) return;
+
+  messageRates = testDelays.map(function(delay) {
+    return program.messages / utils.toSecond(delay);
+  });
+
+  var report = createReport('end');
+  report.messageRates = messageRates;
+  process.send(report);
+  process.exit();
+}
+
+function createReport(type) {
+  return {
+    type: type || 'report',
+    connecting: connecting,
+    connected: connected,
+    finished: finished,
+    connectErrors: connectErrors,
+    errors: errors
+  };
+}

@@ -1,0 +1,25 @@
+{
+  "name": "io-bench",
+  "version": "0.1.0",
+  "description": "A benchmark tool for socket.io, engine.io and websocket server",
+  "scripts": {
+    "test": "mocha --reporter dot"
+  },
+  "bin": {
+    "io-bench": "./bin/io-bench"
+  },
+  "dependencies": {
+    "async": "1.1.0",
+    "cli-table": "0.3.1",
+    "commander": "2.8.1",
+    "engine.io-client": "1.5.1",
+    "socket.io-client": "1.3.5",
+    "ws": "0.7.2"
+  },
+  "devDependencies": {
+    "engine.io": "~1.5.1",
+    "expect.js": "~0.3.1",
+    "mocha": "~2.2.5",
+    "socket.io": "~1.3.5"
+  }
+}
