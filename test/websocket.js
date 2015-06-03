@@ -3,7 +3,7 @@ var spawn = require('child_process').spawn;
 var WSServer = require('ws').Server;
 
 describe('websocket transport', function(done) {
-  this.timeout(5000);
+  this.timeout(10000);
 
   before(function(done) {
     this.http = http.createServer();
