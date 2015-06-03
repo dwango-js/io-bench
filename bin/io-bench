@@ -31,7 +31,7 @@ if (!program.args.length) {
 
 program.connections = program.connections || 1;
 program.concurrency = program.concurrency || 1;
-program.messages = program.messages || 1;
+program.messages = program.messages || 0;
 program.messageRate = program.messageRate || 1;
 program.buffer = null != program.buffer ? program.buffer : 1024;
 program.workers = program.workers || os.cpus().length;
@@ -196,26 +196,27 @@ if (program.wait) {
 }
 
 function test(socket) {
-  var start;
+  var start = process.hrtime();
   var counter = 0;
+
+  if (!program.messages) {
+    socket.disconnect();
+    return;
+  }
 
   animationFrame.request(function tick() {
     var data = buffers[Math.floor(Math.random() * 100)];
 
     if (counter < program.messages) {
-      if (!counter) {
-        socket.send(data, function() {
-          start = process.hrtime();
-        });
-      } else {
+      if (counter < program.messages - 1) {
         socket.send(data);
+      } else {
+        socket.send(data, function() {
+          if (start) testDelays.push(process.hrtime(start));
+          socket.disconnect();
+        });
       }
       animationFrame.request(tick);
-    } else {
-      socket.send(data, function() {
-        testDelays.push(process.hrtime(start));
-        socket.disconnect();
-      });
     }
 
     counter++;
