@@ -1,6 +1,6 @@
 {
   "name": "io-bench",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A benchmark tool for socket.io, engine.io and websocket server",
   "scripts": {
     "test": "mocha --reporter dot"
