@@ -17,8 +17,13 @@ describe('socket.io transport', function(done) {
   });
 
   after(function() {
-    this.server.close();
     this.http.close(done);
+    try {
+      this.server.close();
+    } catch (e) {
+      // pass through
+      // an error throwen on node 0.10
+    }
   });
 
   it('should run bench', function(done) {
